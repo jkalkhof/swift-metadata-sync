@@ -49,7 +49,7 @@ def parse_args():
 def main():
     args = parse_args()
     if not os.path.exists(args.config):
-        print 'Configuration file does not exist'
+        print('Configuration file does not exist')
         exit(0)
 
     conf = load_config(args.config)

@@ -30,7 +30,9 @@ class MetadataSync(BaseSync):
     USER_META_PREFIX = 'x-object-meta-'
 
     def __init__(self, status_dir, settings, per_account=False):
-        super(MetadataSync, self).__init__(status_dir, settings, per_account)
+        super().__init__(status_dir, settings)
+        # Note that the syntax changed in Python 3.0: you can just say super().__init__() instead of super(ChildB, self).__init__()
+        # super(MetadataSync, self).__init__(status_dir, settings, per_account)
 
         self.logger = logging.getLogger('swift-metadata-sync')
         es_hosts = settings['es_hosts']
@@ -41,6 +43,11 @@ class MetadataSync(BaseSync):
         self._parse_json = settings.get('parse_json', False)
         self._pipeline = settings.get('pipeline')
         self._verify_mapping()
+
+        self.logger.debug('metadata_sync: init: settings: %s' % repr(settings))
+        self.logger.debug('metadata_sync: init: elasticsearch version: %s' % repr(self._server_version))
+
+        self.debugLevel = 1
 
     def get_last_row(self, db_id):
         if not os.path.exists(self._status_file):
@@ -79,7 +86,12 @@ class MetadataSync(BaseSync):
             f.truncate()
             return
 
-    def handle(self, rows, internal_client):
+    def handle(self, rows):
+        self.logger.debug("Handling rows: %s" % repr(rows))
+        self.handle_internal(rows, self._swift_client)
+
+    # container_crawler/__init__.py : submit_items -> handle
+    def handle_internal(self, rows, internal_client):
         self.logger.debug("Handling rows: %s" % repr(rows))
         if not rows:
             return []
@@ -94,7 +106,9 @@ class MetadataSync(BaseSync):
                                         '_index': self._index,
                                         '_type': self.DOC_TYPE})
                 continue
-            mget_map[self._get_document_id(row)] = row
+            self.logger.debug('row: %s' % row)
+            row_key = self._get_document_id(row)
+            mget_map[row_key] = row
 
         if bulk_delete_ops:
             errors = self._bulk_delete(bulk_delete_ops)
@@ -102,7 +116,8 @@ class MetadataSync(BaseSync):
             self._check_errors(errors)
             return
 
-        self.logger.debug("multiple get map: %s" % repr(mget_map))
+        # self.logger.debug("multiple get map: %s" % repr(mget_map))
+
         stale_rows, mget_errors = self._get_stale_rows(mget_map)
         errors += mget_errors
         update_ops = [self._create_index_op(doc_id, row, internal_client)
@@ -155,10 +170,18 @@ class MetadataSync(BaseSync):
                                           self._extract_error(op_info)))
         return errors
 
+    # https://elasticsearch-py.readthedocs.io/en/v8.8.1/api.html#module-elasticsearch
+    # https://elasticsearch-py.readthedocs.io/en/5.5.1/
+    # https://elasticsearch-py.readthedocs.io/en/5.5.1/api.html#elasticsearch
+    # https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-multi-get.html
+    # https://stackoverflow.com/questions/49437215/serialization-error-using-elasticsearch-python
+	# https://stackoverflow.com/questions/35441373/how-to-use-python-elasticsearch-mget-api
     def _get_stale_rows(self, mget_map):
         errors = []
         stale_rows = []
-        results = self._es_conn.mget(body={'ids': mget_map.keys()},
+
+        # print('_get_stale_rows: mget_map.keys:',list(mget_map.keys()))
+        results = self._es_conn.mget(body={'ids': list(mget_map.keys()) },
                                      index=self._index,
                                      refresh=True,
                                      _source=['x-timestamp'])
@@ -179,7 +202,10 @@ class MetadataSync(BaseSync):
                     'x-timestamp', 0):
                 stale_rows.append((doc['_id'], row))
                 continue
-        self.logger.debug("Stale rows: %s" % repr(stale_rows))
+
+        # self.logger.debug("Stale rows: %s" % repr(stale_rows))
+        self.logger.debug("Stale rows: %s" % repr(len(stale_rows)))
+
         return stale_rows, errors
 
     def _create_index_op(self, doc_id, row, internal_client):
@@ -191,7 +217,8 @@ class MetadataSync(BaseSync):
               '_type': self.DOC_TYPE,
               '_source': self._create_es_doc(meta, self._account,
                                              self._container,
-                                             row['name'].decode('utf-8'),
+                                             # row['name'].decode('utf-8'),
+                                             row['name'],
                                              self._parse_json),
               '_id': doc_id}
         if self._pipeline:
@@ -255,11 +282,18 @@ class MetadataSync(BaseSync):
         es_doc['x-swift-account'] = account
         es_doc['x-swift-container'] = container
 
+        # user_meta_keys = dict(
+        #     [(k.split(MetadataSync.USER_META_PREFIX, 1)[1].decode('utf-8'),
+        #       _parse_document(v) if parse_json else v.decode('utf-8'))
+        #      for k, v in meta.items()
+        #      if k.startswith(MetadataSync.USER_META_PREFIX)])
+
         user_meta_keys = dict(
-            [(k.split(MetadataSync.USER_META_PREFIX, 1)[1].decode('utf-8'),
-              _parse_document(v) if parse_json else v.decode('utf-8'))
+            [(k.split(MetadataSync.USER_META_PREFIX, 1)[1],
+              _parse_document(v) if parse_json else v)
              for k, v in meta.items()
              if k.startswith(MetadataSync.USER_META_PREFIX)])
+
         es_doc.update(user_meta_keys)
         for field in MetadataSync.DOC_MAPPING.keys():
             if field in es_doc:
@@ -304,8 +338,11 @@ class MetadataSync(BaseSync):
         }
 
     def _get_document_id(self, row):
-        return hashlib.sha256(
-            '/'.join([self._account.encode('utf-8'),
-                      self._container.encode('utf-8'),
+        unique_str = '/'.join([self._account,
+                      self._container,
                       row['name']])
-        ).hexdigest()
+        unique_str = unique_str.encode('utf-8')
+        if (self.debugLevel > 1): self.logger.debug('_get_document_id: unique_str: %s' % unique_str)
+        unique_id = hashlib.sha256(unique_str).hexdigest()
+        if (self.debugLevel > 1): self.logger.debug('_get_document_id: unique_id: %s' % repr(unique_id))
+        return unique_id
