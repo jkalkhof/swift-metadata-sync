@@ -87,9 +87,13 @@ COPY test/container/launch.sh /swift-metadata-sync/
 COPY ./swift_metadata_sync/*.py /swift_metadata_sync/
 COPY test/container/swift-metadata-sync.conf /swift-metadata-sync/
 
-EXPOSE 9200
 RUN locale-gen en_US.UTF-8
 ENV LANG='en_US.UTF-8' LANGUAGE='en_US:en' LC_ALL='en_US.UTF-8'
 
-#CMD ["/bin/bash", "/swift-metadata-sync/test/container/launch.sh"]
-# CMD ["/bin/bash", "/swift-metadata-sync/launch.sh"]
+COPY test/container/startmain.sh /usr/local/bin/startmain.sh
+RUN chmod 755 /usr/local/bin/*.sh
+
+EXPOSE 8080
+EXPOSE 9200
+
+CMD /usr/local/bin/startmain.sh
